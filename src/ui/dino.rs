@@ -131,30 +131,24 @@ const AIRTIME: f32 = 2.0 * JUMP_V0 / GRAVITY;
 ///
 /// 終端機**收不到放開鍵**（實測：crossterm 在這裡只送 `Press`，
 /// 沒有 `Release` 也沒有 `Repeat`），所以不能照瀏覽器的 keydown/keyup
-/// 模型。改成「按一下蹲一段時間，再按就延長」：
-/// 按住時鍵盤自動重複會一直延長，點一下也會蹲得夠久讓人看得見。
-///
-/// 一次 ↓ 讓恐龍蹲多久。終端機收不到放開鍵，所以蹲下必須自己撐一段時間；
-/// 按住時作業系統的自動重複會一直送 ↓ 進來，每一下都把時間往後延。
+/// 模型。改成「按一下蹲一段時間，再按就延長」：按住時作業系統的自動重複
+/// 會一直送 ↓ 進來，每一下都把時間往後延；點一下也會蹲得夠久讓人看得見。
 ///
 /// 撐多久，決定的不是「什麼時候放開」，而是**兩個 ↓ 之間最長會隔多久**：
+/// 第一下之後要等作業系統的起始延遲（X11 660 ms、GNOME / Windows 500、
+/// macOS 預設 375），重複才會開始；重複開始後按鍵還要經過終端機、ssh、
+/// VS Code 的 pty host，機器忙時那條管線會卡幾百毫秒再一次補送。程式沒有
+/// 辦法分辨「管線卡住」和「真的放開」，這個時間就是唯一的槓桿，而且兩頭都會痛：
 ///
-/// * 第一下之後要等作業系統的起始延遲（X11 660 ms、GNOME / Windows 500、
-///   macOS 預設 375、最慢 1.8 s），重複才會開始。
-/// * 重複開始之後也不保證準時：按鍵是經過終端機、ssh、VS Code 的 pty host
-///   才到這裡的，機器忙起來那條管線會卡個幾百毫秒再一次補送。真 PTY 量到：
-///   每 30 ms 一個 ↓、管線卡 200 ms，恐龍就站了 100 ms —— 使用者看到的
-///   「有時候閃一幀」就是這個，正好在翼龍底下就死了。
+/// * 太短（早期 400 ms）：起始延遲還沒過蹲就到期，翼龍正在頭上那一格
+///   站起來被撞死，看起來像隨機閃一幀。
+/// * 太長（試過 2 秒，連管線卡頓都蓋得過）：放開之後恐龍還要蹲到時間到，
+///   最多兩秒，玩起來像沒反應 —— 使用者試過，太久。
 ///
-/// 早期用 400 / 750 ms；後來試過「跟著重複間隔縮短」（放開後能更快站起來），
-/// 但那把容忍的空隙縮到 120 ms，管線一頓就閃。程式沒有辦法分辨「管線卡住」
-/// 和「真的放開」，唯一的槓桿就是這個時間；而蹲久一點沒有任何壞處（蹲著照樣
-/// 能跳、蹲不會撞到本來不會撞的東西），所以取 2 秒：起始延遲與常見的卡頓
-/// 都蓋得過，放開之後最多蹲兩秒。
-const DUCK_HOLD: Duration = Duration::from_millis(2000);
-/// 畫面上站起來之後，碰撞箱再多算蹲的時間。管線卡超過 [`DUCK_HOLD`] 那一格
-/// 畫面會閃一下，但至少不該因此死掉。
-const DUCK_HIT_GRACE: Duration = Duration::from_millis(1000);
+/// 750 ms 蓋過常見的起始延遲，放開後最多 0.75 秒站起來；管線卡超過這個
+/// 時間的那一格會閃一下站姿，那是接受的取捨。蹲著照樣能跳（跳會取消蹲），
+/// 仙人掌也不會因為蹲而躲得掉，所以點一下蹲久一點沒有壞處。
+const DUCK_HOLD: Duration = Duration::from_millis(750);
 
 // ── 剪影 ────────────────────────────────────────────────────────────────
 //
@@ -665,13 +659,6 @@ impl Dino {
     pub fn is_night(&self) -> bool {
         (self.score() / chrome::INVERT_DISTANCE) % 2 == 1
     }
-    /// 剛站起來不久：碰撞箱還算蹲（見 [`DUCK_HIT_GRACE`]）。
-    fn duck_hitbox(&self, now: Instant) -> bool {
-        !self.is_over()
-            && self.y <= 0.0
-            && self.duck_until.is_some_and(|t| t + DUCK_HIT_GRACE > now)
-    }
-
     fn ducking(&self, now: Instant) -> bool {
         // 撞到之後畫的是站著的撞擊圖，位置也得回到站著的地方 —— 不然蹲著
         // 撞上的那一格，恐龍會往後跳三格半（蹲姿是往後長的）。
@@ -903,8 +890,8 @@ impl Dino {
     /// 恐龍現在的碰撞範圍（子像素）。
     fn hitbox(&self, now: Instant) -> (f32, f32, f32, f32) {
         // 縮一圈：剪影邊緣有空白，用外框判定會誤判成撞到。
-        // 碰撞箱用的是「蹲的保留期」，比畫面上的蹲多撐一段。
-        if self.duck_hitbox(now) {
+        // 碰撞箱跟著畫面：畫的是蹲就用蹲的箱子，站起來就用站的。
+        if self.ducking(now) {
             let x = Self::duck_x() as f32 + 2.0;
             let w = DUCK[0].len() as f32 - 4.0;
             (x, x + w, self.y, self.y + DUCK.len() as f32 - 1.0)
@@ -1243,36 +1230,31 @@ mod tests {
         g.started = t; // 開場無障礙，專心量蹲
         g.on_key(Key::Down, t);
         assert!(g.ducking(t), "按了 ↓ 卻沒有蹲");
-        run(&mut g, &mut t, 1.9);
-        assert!(g.ducking(t), "不到兩秒就站起來：蓋不過起始延遲或管線卡頓");
+        run(&mut g, &mut t, 0.2);
+        assert!(g.ducking(t), "0.2 秒之後就站起來了，看不見");
+        run(&mut g, &mut t, 0.4);
+        assert!(g.ducking(t), "0.6 秒就站起來：蓋不過鍵盤重複的起始延遲");
         run(&mut g, &mut t, 0.3);
         assert!(!g.ducking(t), "蹲著不起來");
     }
 
     #[test]
-    fn holding_down_never_stands_up_even_when_the_input_pipeline_stalls() {
-        // 按住 ↓：先等作業系統的起始延遲，然後每 30 ms 一個；中途管線
-        // 卡 900 ms（事件晚到、之後一次補送）。整段任何一格都不能站起來 ——
-        // 站起來的那一格正好在翼龍底下就死了（使用者回報「有時候閃一幀」）。
-        for delay in [375u64, 660, 1000, 1800] {
+    fn holding_down_through_the_initial_repeat_delay_never_stands_up() {
+        // 按住 ↓：第一個重複事件要等作業系統的起始延遲（X11 660 ms、
+        // GNOME / Windows 500、macOS 375），之後每 40 ms 一個。中間任何一格
+        // 都不能站起來 —— 站起來的那一格正好在翼龍底下就死了（「閃一幀」）。
+        for delay in [375u64, 500, 660, 700] {
             let (mut g, mut t) = game(3);
-            // 這一段跑 4.5 秒，比開場的無障礙時間長：把開場往後推，不然
-            // 第一根仙人掌會在 4.3 秒撞死牠，測的就變成「有沒有跳」。
-            g.started = t + Duration::from_secs(10);
+            g.started = t; // 開場無障礙，專心量蹲
             g.on_key(Key::Down, t);
             let start = t;
             let mut next = start + Duration::from_millis(delay);
-            let stall = (
-                start + Duration::from_millis(2500),
-                start + Duration::from_millis(3400),
-            );
-            while t < start + Duration::from_millis(4500) {
+            while t < start + Duration::from_millis(1500) {
                 t += FRAME;
                 g.tick(t);
-                let stalled = t >= stall.0 && t < stall.1;
-                if t >= next && !stalled {
+                if t >= next {
                     g.on_key(Key::Down, t);
-                    next += Duration::from_millis(30);
+                    next += Duration::from_millis(40);
                 }
                 assert!(
                     g.ducking(t),
@@ -1285,37 +1267,33 @@ mod tests {
 
     #[test]
     fn releasing_the_key_stands_up_within_the_hold() {
+        // 放開之後從最後一個 ↓ 起算 750 ms 站起來：這是「按住不閃」與
+        // 「放開有反應」之間選的點（2 秒試過，放開後蹲太久）。
         let (mut g, mut t) = game(3);
         g.started = t;
         for _ in 0..20 {
             g.on_key(Key::Down, t);
             run(&mut g, &mut t, 0.05);
         }
-        run(&mut g, &mut t, 1.9);
-        assert!(g.ducking(t), "放開不到兩秒就站起來");
-        run(&mut g, &mut t, 0.2);
-        assert!(!g.ducking(t), "放開兩秒後還蹲著");
+        run(&mut g, &mut t, 0.6);
+        assert!(g.ducking(t), "放開不到 0.75 秒就站起來");
+        run(&mut g, &mut t, 0.25);
+        assert!(!g.ducking(t), "放開 0.9 秒後還蹲著");
     }
 
     #[test]
-    fn the_hitbox_stays_low_a_little_longer_than_the_sprite() {
-        // 畫面站起來之後一秒內，碰撞箱還算蹲：極端的管線卡頓會讓畫面閃一下，
-        // 但不該因此死掉。
+    fn the_hitbox_follows_the_sprite() {
+        // 畫的是蹲就用蹲的碰撞箱，站起來就換回站的；跳起來立刻算站著。
         let (mut g, mut t) = game(3);
         g.started = t;
+        let (.., standing_top) = g.hitbox(t);
         g.on_key(Key::Down, t);
         let (.., duck_top) = g.hitbox(t);
-        run(&mut g, &mut t, 2.1);
+        assert!(duck_top + 5.0 < standing_top, "蹲下碰撞箱沒有變矮");
+        run(&mut g, &mut t, 0.9);
         assert!(!g.ducking(t), "畫面應該站起來了");
         let (.., top) = g.hitbox(t);
-        assert!(
-            (top - duck_top).abs() < 0.01,
-            "剛站起來碰撞箱就變高了：{top} vs {duck_top}"
-        );
-        run(&mut g, &mut t, 1.0);
-        let (.., top) = g.hitbox(t);
-        assert!(top > duck_top + 5.0, "一秒之後碰撞箱該回到站著的高度");
-        // 跳躍立刻取消保留：空中的碰撞箱是站著的
+        assert!((top - standing_top).abs() < 0.01, "站起來了碰撞箱還是蹲的");
         g.on_key(Key::Down, t);
         g.on_key(Key::Char(' '), t);
         run(&mut g, &mut t, 0.05);
