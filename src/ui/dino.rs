@@ -134,8 +134,13 @@ const AIRTIME: f32 = 2.0 * JUMP_V0 / GRAVITY;
 /// 模型。改成「按一下蹲一段時間，再按就延長」：
 /// 按住時鍵盤自動重複會一直延長，點一下也會蹲得夠久讓人看得見。
 ///
-/// 400 毫秒 ≈ 最高速時一隻翼龍通過的時間，夠躲掉但不會蹲著不起來。
-const DUCK_HOLD: Duration = Duration::from_millis(400);
+/// 這個時間必須**蓋過鍵盤自動重複的起始延遲**。按住 ↓ 時，第一個重複事件
+/// 要等作業系統的「延遲」才會來（X11 預設 660 ms、GNOME / Windows 500 ms、
+/// macOS 最長約 1 s），之後才是每幾十毫秒一個。早期是 400 ms：第一個重複
+/// 還沒到，蹲就過期了 —— 翼龍正在頭上那一格恐龍站起來、被撞死，看起來像
+/// 隨機閃一幀（使用者回報）。750 ms 蓋過常見的預設值；點一下蹲久一點沒有
+/// 壞處：蹲著照樣能跳（跳會取消蹲），仙人掌也不會因為蹲而躲得掉。
+const DUCK_HOLD: Duration = Duration::from_millis(750);
 
 // ── 剪影 ────────────────────────────────────────────────────────────────
 //
@@ -1215,8 +1220,35 @@ mod tests {
         assert!(g.ducking(t), "按了 ↓ 卻沒有蹲");
         run(&mut g, &mut t, 0.2);
         assert!(g.ducking(t), "0.2 秒之後就站起來了，看不見");
-        run(&mut g, &mut t, 0.4);
+        run(&mut g, &mut t, 0.5);
+        assert!(g.ducking(t), "0.7 秒就站起來：蓋不過鍵盤重複的起始延遲");
+        run(&mut g, &mut t, 0.3);
         assert!(!g.ducking(t), "蹲著不起來");
+    }
+
+    #[test]
+    fn holding_down_with_a_slow_key_repeat_never_stands_up() {
+        // 按住 ↓：第一個重複事件要等作業系統的起始延遲（X11 預設 660 ms），
+        // 之後每 40 ms 一個。中間任何一格都不能站起來 —— 站起來的那一格
+        // 正好在翼龍底下就死了（使用者回報的「閃一幀」）。
+        let (mut g, mut t) = game(3);
+        g.started = t; // 開場無障礙，專心量蹲
+        g.on_key(Key::Down, t);
+        let start = t;
+        let mut next_repeat = start + Duration::from_millis(660);
+        while t < start + Duration::from_millis(1500) {
+            t += FRAME;
+            g.tick(t);
+            if t >= next_repeat {
+                g.on_key(Key::Down, t);
+                next_repeat += Duration::from_millis(40);
+            }
+            assert!(
+                g.ducking(t),
+                "按住不放卻在 {:.0} ms 站起來了",
+                t.duration_since(start).as_secs_f32() * 1000.0
+            );
+        }
     }
 
     #[test]
