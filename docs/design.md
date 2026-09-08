@@ -318,16 +318,21 @@ sysview 刻意**不用** `sysinfo` 之類的抽象把來源蓋掉 —— 你能�
 
 ## 效能
 
-實測環境：i7-13700（24 執行緒）、62 GB RAM、RTX 4070 Ti、約 530 個行程。
+實測環境：i7-13700（24 執行緒）、62 GB RAM、RTX 4070 Ti、約 530 個行程，
+190×48 的終端機、Overview 頁、預設 1 秒間隔、什麼都不按 30 秒。
+CPU 是行程的 utime+stime 除以牆鐘時間；RSS 是 `/proc/<pid>/status` 的 VmRSS；
+「一幀」是把整個畫面畫進緩衝區的時間，不含終端機寫出。
 
 | 項目 | 成本 |
 |---|---|
 | 單輪完整取樣 | **5.14 ms** |
-| 1 Hz 下的 CPU | **0.51% 單核 = 全機 0.021%** |
-| 每頁渲染 | 0.14 – 0.34 ms |
-| 常駐記憶體（含 NVML） | ~21 MB |
-| 常駐記憶體（`--no-gpu`） | **4.0 MB** |
-| 執行檔 | sysview 2.3 MB · sysview-priv 0.8 MB |
+| 閒置 CPU（預設） | **1.1% 單核 = 全機 0.046%** |
+| 閒置 CPU（`--no-gpu`） | 0.9% 單核 = 全機 0.037% |
+| 閒置 CPU（`-i 0.5`） | 1.5% 單核 = 全機 0.062% |
+| 每頁渲染（200×60） | 0.14 – 0.41 ms |
+| 常駐記憶體（含 NVML） | 21 MB |
+| 常駐記憶體（`--no-gpu`） | **6 MB** |
+| 執行檔 | sysview 2.9 MB · sysview-priv 0.8 MB |
 
 各 collector 拆解：
 
@@ -351,8 +356,8 @@ NVML 的 dlopen 會讓 RSS 增加約 15 MB —— **那是 NVIDIA 驅動函式�
 | 設定 | RSS |
 |---|---|
 | 無 collector、無 NVML | 2.5 MB |
-| TUI，NVML 未載入 | 4.9 MB |
-| TUI，NVML 載入 | 21.0 MB |
+| TUI，NVML 未載入 | 6 MB |
+| TUI，NVML 載入 | 21 MB |
 
 換來的是每次 GPU 輪詢從 fork `nvidia-smi` 的 **12.3 ms 降到 1.33 ms（約 10 倍）**。
 在 server 上 CPU 通常比 15 MB 重要，但需要極小記憶體的部署可以用 `--no-gpu`。

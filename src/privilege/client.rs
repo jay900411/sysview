@@ -36,6 +36,27 @@ const HELPER_CANDIDATES: &[&str] = &[
     "/usr/local/lib/sysview/sysview-priv",
 ];
 
+/// `sudo` 的位置。**不用 PATH**：我們把密碼提示整個交給 sudo，PATH 前面一個
+/// 假的 `sudo` 就能假冒那個提示騙走密碼（多人機器上一個誤設成 world-writable
+/// 的 PATH 目錄就夠了）。真的 sudo 一定是 root 擁有的 setuid 檔，這裡也一併確認。
+const SUDO_CANDIDATES: &[&str] = &["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"];
+
+fn sudo_binary() -> Result<PathBuf, PrivError> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    for c in SUDO_CANDIDATES {
+        let p = Path::new(c);
+        if let Ok(md) = std::fs::metadata(p) {
+            if md.is_file() && md.uid() == 0 && md.permissions().mode() & 0o4000 != 0 {
+                return Ok(p.to_path_buf());
+            }
+        }
+    }
+    Err(PrivError::Failed(
+        "找不到系統的 sudo（/usr/bin/sudo 不存在，或不是 root 擁有的 setuid 檔）".into(),
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrivilegeState {
     /// 系統上找不到 helper（沒安裝，或只裝了 TUI）。
@@ -211,7 +232,7 @@ impl PrivilegeClient {
             .ok_or_else(|| PrivError::HelperMissing("helper 未安裝".into()))?;
         // 直接跑一次 capability：這樣 sudoers 若限定只能跑 helper 也能通過，
         // 比 `sudo -v`（需要更寬的權限）更符合最小權限原則。
-        let status = Command::new("sudo")
+        let status = Command::new(sudo_binary()?)
             .arg("--")
             .arg(&helper)
             .arg("capability")
@@ -274,7 +295,7 @@ impl PrivilegeClient {
         // 每次執行前重新檢查 helper 的權限：安裝後被人動過手腳就要拒絕。
         verify_helper_safety(helper).map_err(|e| PrivError::HelperUnsafe(e.to_string()))?;
 
-        let mut cmd = Command::new("sudo");
+        let mut cmd = Command::new(sudo_binary()?);
         cmd.arg("-n") // 非互動：絕不跳密碼提示
             .arg("--") // 選項結束，後面全是參數，不會被當成 sudo 選項
             .arg(helper)
@@ -411,24 +432,61 @@ pub fn verify_helper_safety(path: &Path) -> Result<(), std::io::Error> {
             path.display()
         )));
     }
-    // 開發環境（cargo target 目錄）的檔案本來就屬於一般使用者，
-    // 這時不做 root 擁有者檢查，但正式安裝路徑一定要檢查。
-    let is_system_path = HELPER_CANDIDATES.iter().any(|c| path == Path::new(c));
-    if is_system_path {
-        if md.uid() != 0 {
+    if mode & 0o022 != 0 {
+        return Err(std::io::Error::other(format!(
+            "{} 可被 group/other 寫入（mode {:o}）—— 等於任何人都能拿 root",
+            path.display(),
+            mode & 0o7777
+        )));
+    }
+    // 開發樹 = 跟正在執行的 sysview 同一個目錄（cargo 的 target/）。那裡的檔本來就
+    // 屬於一般使用者，但必須是**自己的**：別人放在那裡的東西不能拿去 sudo。
+    // 這只對本來就有 sudo 的開發者有意義，不是給部署用的。
+    let dev_tree = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+        .is_some_and(|d| path.parent() == Some(d.as_path()));
+    if dev_tree {
+        let me = crate::collectors::util::real_uid();
+        if md.uid() != me && md.uid() != 0 {
             return Err(std::io::Error::other(format!(
-                "{} 的擁有者不是 root（uid {}）",
+                "{} 在開發樹裡但不是你的檔（uid {}）",
                 path.display(),
                 md.uid()
             )));
         }
-        if mode & 0o022 != 0 {
+        return Ok(());
+    }
+    // 其他任何地方（正式路徑、自訂 PREFIX）都是「即將以 root 執行的系統檔」：
+    // root 擁有，而且每一層上層目錄也要是 root 擁有、other 不可寫 —— 上層目錄
+    // 可寫的話整個檔都能被換掉，檔本身的權限再嚴也沒用。
+    if md.uid() != 0 {
+        return Err(std::io::Error::other(format!(
+            "{} 的擁有者不是 root（uid {}）",
+            path.display(),
+            md.uid()
+        )));
+    }
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        let dm = std::fs::metadata(dir)?;
+        if dm.uid() != 0 {
             return Err(std::io::Error::other(format!(
-                "{} 可被 group/other 寫入（mode {:o}）—— 等於任何人都能拿 root",
+                "{} 的上層目錄 {} 不是 root 擁有（uid {}）",
                 path.display(),
-                mode & 0o7777
+                dir.display(),
+                dm.uid()
             )));
         }
+        if dm.permissions().mode() & 0o002 != 0 {
+            return Err(std::io::Error::other(format!(
+                "{} 的上層目錄 {} 任何人都能寫（mode {:o}）—— helper 可以被整個換掉",
+                path.display(),
+                dir.display(),
+                dm.permissions().mode() & 0o7777
+            )));
+        }
+        ancestor = dir.parent();
     }
     Ok(())
 }
@@ -543,14 +601,53 @@ mod tests {
 
     #[test]
     fn accepts_plain_executable_in_dev_tree() {
+        // 開發樹 = 跟正在執行的程式同一個目錄；測試執行檔在 target/…/deps/ 裡
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let p = dir.join(format!("sysview-priv-test-{}", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = verify_helper_safety(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(r.is_ok(), "開發樹裡自己的普通執行檔應可使用：{r:?}");
+    }
+
+    #[test]
+    fn a_helper_anywhere_else_must_be_root_owned() {
+        // 自訂 PREFIX 也是正式安裝：不是 root 的檔不能拿去 sudo
         let t = tempfile::tempdir().unwrap();
         let p = t.path().join("sysview-priv");
         std::fs::write(&p, b"x").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(
-            verify_helper_safety(&p).is_ok(),
-            "開發樹裡的普通執行檔應可使用"
-        );
+        let e = verify_helper_safety(&p).unwrap_err();
+        assert!(e.to_string().contains("root"), "{e}");
+    }
+
+    #[test]
+    fn sudo_comes_from_a_fixed_system_path_and_is_setuid_root() {
+        use std::os::unix::fs::MetadataExt;
+        match sudo_binary() {
+            Ok(p) => {
+                assert!(
+                    SUDO_CANDIDATES.iter().any(|c| Path::new(c) == p),
+                    "{}",
+                    p.display()
+                );
+                let md = std::fs::metadata(&p).unwrap();
+                assert_eq!(md.uid(), 0);
+                assert!(
+                    md.permissions().mode() & 0o4000 != 0,
+                    "sudo 必須是 setuid root"
+                );
+            }
+            Err(_) => assert!(
+                SUDO_CANDIDATES.iter().all(|c| !Path::new(c).exists()),
+                "系統有 sudo 卻說找不到"
+            ),
+        }
     }
 
     #[test]

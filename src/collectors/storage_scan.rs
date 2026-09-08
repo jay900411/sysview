@@ -5,6 +5,9 @@
 //! * **按需執行**，絕不進入取樣迴圈。每秒掃 `/home` 會把伺服器拖垮。
 //! * 有 deadline、有 entry 上限、可取消 —— 任何一個觸發就標記為 partial 並停止。
 //! * **不跟隨 symlink**（一律 `symlink_metadata`），避免無窮迴圈與越權讀取。
+//!   目錄是**以 fd 為錨**走訪的：`lstat` 看到是目錄之後，用 `O_NOFOLLOW|O_DIRECTORY`
+//!   開起來、`fstat` 比對同一個 (dev, ino)，之後都經 `/proc/self/fd/N/…` 讀。
+//!   路徑在兩次查看之間被使用者換成 symlink（他在自己家目錄裡做得到）也進不去別的樹。
 //! * **不跨檔案系統邊界**，避免把整個 NFS 或備份碟算進某個使用者頭上。
 //! * hard link 以 `(device, inode)` 去重，跟 `du` 的行為一致。
 //! * 用 **已配置區塊** `st_blocks × 512` 而不是 `st_size`，稀疏檔才不會被高估。
@@ -131,11 +134,20 @@ impl Walker<'_> {
         false
     }
 
-    fn walk(&mut self, dir: &Path, depth: usize) -> u64 {
+    fn walk(&mut self, dir: &Path, expect: (u64, u64), depth: usize) -> u64 {
         if depth > self.limits.max_depth || self.budget_exhausted() {
             return 0;
         }
-        let iter = match std::fs::read_dir(dir) {
+        let handle = match open_dir_checked(dir, expect) {
+            Ok(h) => h,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    self.denied += 1;
+                }
+                return 0;
+            }
+        };
+        let iter = match std::fs::read_dir(fd_path(&handle)) {
             Ok(i) => i,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -170,7 +182,7 @@ impl Walker<'_> {
                 if md.dev() != self.root_dev {
                     continue;
                 }
-                total += self.walk(&path, depth + 1);
+                total += self.walk(&path, (md.dev(), md.ino()), depth + 1);
                 total += blocks_bytes(&md);
             } else {
                 // symlink / socket / fifo / device：只算它自己的 inode 大小，
@@ -186,6 +198,28 @@ impl Walker<'_> {
         }
         total
     }
+}
+
+/// 開一個目錄當錨：`O_NOFOLLOW | O_DIRECTORY`，開完 `fstat` 比對 `lstat` 當時看到的
+/// (dev, ino)。路徑在 `lstat` 與 `open` 之間被換成 symlink（或換成另一個目錄）
+/// 就在這裡擋下 —— 不是靠「檢查得夠快」，是靠開到的東西必須就是檢查過的那個。
+fn open_dir_checked(path: &Path, expect: (u64, u64)) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)?;
+    let md = f.metadata()?;
+    if (md.dev(), md.ino()) != expect {
+        return Err(std::io::Error::other("目錄在檢查與開啟之間被換掉了"));
+    }
+    Ok(f)
+}
+
+/// 經由已開的 fd 定址：之後的 `read_dir` / `lstat` 都走這條，跟路徑名再無關係。
+fn fd_path(f: &std::fs::File) -> std::path::PathBuf {
+    use std::os::unix::io::AsRawFd;
+    std::path::PathBuf::from(format!("/proc/self/fd/{}", f.as_raw_fd()))
 }
 
 /// `st_blocks` 一律以 512 位元組為單位（POSIX 規定，與檔案系統的區塊大小無關）。
@@ -228,7 +262,13 @@ pub fn scan_directory(root: &Path, limits: ScanLimits, cancel: &Cancel) -> ScanR
     let mut total = blocks_bytes(&root_md);
     let mut loose_files = 0u64;
 
-    match std::fs::read_dir(root) {
+    // handle 要活到整個迴圈結束：entry.path() 都是 /proc/self/fd/<handle>/… 這種路徑
+    let root_handle = open_dir_checked(root, (root_md.dev(), root_md.ino()));
+    match root_handle
+        .as_ref()
+        .map_err(|e| std::io::Error::new(e.kind(), e.to_string()))
+        .and_then(|h| std::fs::read_dir(fd_path(h)))
+    {
         Ok(iter) => {
             for entry in iter {
                 if w.budget_exhausted() {
@@ -243,7 +283,7 @@ pub fn scan_directory(root: &Path, limits: ScanLimits, cancel: &Cancel) -> ScanR
                 w.entries += 1;
                 if md.is_dir() && md.dev() == w.root_dev {
                     let before = w.entries;
-                    let sub = w.walk(&path, 1) + blocks_bytes(&md);
+                    let sub = w.walk(&path, (md.dev(), md.ino()), 1) + blocks_bytes(&md);
                     total += sub;
                     children.push(ChildUsage {
                         name: entry.file_name().to_string_lossy().into_owned(),
@@ -361,6 +401,40 @@ mod tests {
             "跟隨 symlink 會把外部資料算進來，也會導致無窮迴圈；得到 {} bytes",
             r.bytes
         );
+    }
+
+    #[test]
+    fn a_directory_swapped_for_a_symlink_after_lstat_is_not_entered() {
+        // lstat 說是目錄、開的時候已經是 symlink（使用者在自己家目錄裡做得到）：
+        // O_NOFOLLOW 直接失敗；換成另一個目錄則 (dev, ino) 對不上。
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("real");
+        let other = t.path().join("other");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let rm = fs::symlink_metadata(&real).unwrap();
+        assert!(open_dir_checked(&real, (rm.dev(), rm.ino())).is_ok());
+        let link = t.path().join("link");
+        symlink(&other, &link).unwrap();
+        assert!(
+            open_dir_checked(&link, (rm.dev(), rm.ino())).is_err(),
+            "symlink 不能開"
+        );
+        let om = fs::symlink_metadata(&other).unwrap();
+        assert!(
+            open_dir_checked(&real, (om.dev(), om.ino())).is_err(),
+            "換成別的目錄要被擋"
+        );
+        // 經 fd 讀到的內容跟直接讀一樣
+        write(&real.join("f"), 4096);
+        let h = open_dir_checked(&real, (rm.dev(), rm.ino())).unwrap();
+        let names: Vec<_> = fs::read_dir(fd_path(&h))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("f")]);
     }
 
     #[test]

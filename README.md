@@ -11,9 +11,9 @@
 | | |
 |---|---|
 | 執行檔 | 一個 2.9 MB 的執行檔（Admin 頁的 helper 另外 0.8 MB）；執行期只用到 libc 與 libgcc_s，不裝任何函式庫 |
-| 常駐記憶體 | 5 MB（`--no-gpu`）；21 MB 是連 NVIDIA 驅動函式庫自己的緩衝一起算進去 |
-| 閒置 CPU | 一顆核心的 1%（i7-13700 上等於全機 0.04%），每秒取樣一次；行程掃描在背景執行緒 |
-| 畫面 | 事件驅動：沒有新資料、沒有按鍵就不重畫；一幀不到 0.5 ms |
+| 常駐記憶體 | 6 MB（`--no-gpu`）；21 MB 是連 NVIDIA 驅動函式庫自己的緩衝一起算進去 |
+| 閒置 CPU | 一顆核心的 1.1%（24 執行緒的 i7-13700 上等於全機 0.05%），每秒取樣一次；行程掃描在背景執行緒 |
+| 畫面 | 事件驅動：沒有新資料、沒有按鍵就不重畫；把一幀（200×60）畫進緩衝區不到 0.5 ms |
 
 （實測數字，環境與方法在 [docs/design.md](docs/design.md)。）
 
@@ -122,7 +122,7 @@ rm ~/.local/bin/sysview           # --user 版移除
 sysview                 # 互動儀表板
 sysview -v gpu          # 直接開 GPU 頁
 sysview -i 0.5          # 每 0.5 秒更新
-sysview --no-gpu        # 不載入 NVIDIA 函式庫，常駐記憶體約 4 MB
+sysview --no-gpu        # 不載入 NVIDIA 函式庫，常駐記憶體約 6 MB
 ```
 
 ### 鍵盤
@@ -164,15 +164,16 @@ sysview --no-gpu        # 不載入 NVIDIA 函式庫，常駐記憶體約 4 MB
 | Storage | 掛載點（與 `df` 一致）、每顆裝置的讀寫 / IOPS / 忙碌率 |
 | Network | 每個介面的速率、累計流量、錯誤、IP / MAC，socket 統計 |
 | Processes | 可排序、可篩選、可捲動的行程清單，每一列都能 `e` |
-| Admin | 各使用者的磁碟 / 記憶體（含 PSS）/ VRAM 用量、socket 對應行程。需要 sudo |
+| Admin | 各使用者的磁碟 / 記憶體（含 PSS）/ VRAM 用量、每個使用者的 socket 數。也能對行程送 TERM / INT / HUP、調低優先度（會再確認一次，並記到 journald）。需要 sudo |
 
 ### Admin 頁（需要 sudo）
 
 按 `A` 進入、`u` 解鎖。解鎖時 sysview 會把終端機交給 `sudo` 讓它自己問密碼 ——
 sysview 不讀、不存、不轉送你的密碼。取得 root 的只有一個很小的 helper
 （`sysview-priv`），做完一件 allowlist 上的事就結束；整支 TUI 從頭到尾是你自己的身分。
-誰能解鎖由系統的 sudoers 決定，不是由 sysview 決定。細節與收緊方式見
-[docs/sudo.md](docs/sudo.md)。
+誰能解鎖由系統的 sudoers 決定，不是由 sysview 決定。解鎖後除了看，也能對行程送
+TERM / INT / HUP 或調低優先度：每次都會再確認一次，helper 會把「誰對哪個 PID 做了什麼」
+記到 journald。細節與收緊方式見 [docs/sudo.md](docs/sudo.md)。
 
 ### 非互動
 
@@ -205,7 +206,7 @@ mascot = "fox"          # fox / deer / none
 
 - 整支程式以你的身分執行；提權只經過 sudo，helper 不帶 setuid、不常駐。
 - 不讀 `/proc/<pid>/environ`（環境變數裡常有 token）。
-- 不寫暫存檔、不寫 log；唯一會寫的檔是你自己的彩蛋排行榜紀錄。
+- 監控與 Admin 查到的資料只在記憶體裡，不落地、不快取。唯一會寫的檔是你自己的彩蛋排行榜紀錄（同目錄暫存檔 + rename）。helper 會改狀態的操作會記到 journald，跟 sudo 一樣。
 - 網路頁只看統計，不擷取封包、不做 DNS 反解。
 - `--json` 遵守與互動模式相同的權限。
 
@@ -235,7 +236,8 @@ CI 另外在 Debian 12 容器（沒有 GPU、沒有感測器、沒有 Rust）跑
 ```bash
 make            # 編譯 release
 make lint       # fmt + clippy
-cargo test --all-features
+make test       # 完整測試。一定是 release：效能測試斷言的是發行版的時間預算，debug 會失敗
+cargo test --release --all-features <名字>   # 只跑某幾個
 ```
 
 ## 授權

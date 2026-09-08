@@ -58,6 +58,7 @@ build:
 	  exit 1; }
 	$(CARGO) build --release --locked
 	@sha256sum $(TARGETDIR)/sysview $(TARGETDIR)/sysview-priv > $(STAMP)
+	@$(TARGETDIR)/sysview --banner > $(TARGETDIR)/motd.txt
 
 # 安裝前確認執行檔已經編好。刻意不自動編 —— 見 install 上方的說明。
 check-built:
@@ -110,7 +111,7 @@ test:
 	# 「取樣 3 毫秒內、換頁 1 格內」這種**發行版的**時間預算。debug build
 	# 慢一個數量級以上，那些測試必然失敗 —— 剛 clone 下來的人第一次跑
 	# `make test` 就會看到一片紅，而程式其實好好的。
-	$(CARGO) test --release --all-targets --all-features
+	$(CARGO) test --release --locked --all-targets --all-features
 
 lint:
 	$(CARGO) fmt --check
@@ -201,8 +202,11 @@ verify:
 	   *[2367]) echo "✗ 嚴重：helper 可被 group/other 寫入 (mode $$mode) — 等於任何人都能拿 root"; exit 1;; \
 	 esac; \
 	 echo "  ✓ helper mode $$mode（無 setuid、不可被他人寫入）"
-	@owner=$$(stat -c '%U:%G' $(DESTDIR)$(LIBEXECDIR)/sysview-priv); \
-	 echo "  ✓ helper 擁有者 $$owner"
+	@owner=$$(stat -c '%u' $(DESTDIR)$(LIBEXECDIR)/sysview-priv); \
+	 if [ -z "$(DESTDIR)" ] && [ "$$owner" != 0 ]; then \
+	   echo "✗ 嚴重：helper 擁有者不是 root（uid $$owner）— sudo 會以 root 執行一個別人能改的檔"; exit 1; \
+	 fi; \
+	 echo "  ✓ helper 擁有者 $$(stat -c '%U:%G' $(DESTDIR)$(LIBEXECDIR)/sysview-priv)"
 	@echo "  ✓ 安裝檢查通過"
 
 # 檢查「機器上每個使用者」是不是真的都能執行。
@@ -241,8 +245,10 @@ verify-shared:
 # ── 登入時的歡迎畫面（選用）──────────────────────────────────────────
 #
 # 把 logo + 吉祥物 + 一句話放進 ssh 登入畫面。安全前提：登入時 PAM 是以
-# root 執行 motd 腳本的，所以**登入時絕不執行 sysview** —— 這裡用建置者的
-# 身分把 banner 產成純文字檔（sysview --banner），登入腳本只 cat 那個檔。
+# root 執行 motd 腳本的，所以**登入時絕不執行 sysview**；而且畫面是
+# `make build` 時以建置者的身分產成 target/release/motd.txt 的（讀的是建置者
+# 自己的設定檔，品牌代號才會進來），`sudo make install-motd` 只複製那個檔 ——
+# 整個流程沒有任何一步以 root 執行 sysview。登入腳本只 cat 那個檔。
 #
 # 掛在哪裡（MOTD_MODE）：
 #   auto     預設。/etc/pam.d/sshd 裡 pam_motd 有在跑就用 motd，否則 profile。
@@ -255,10 +261,10 @@ verify-shared:
 MOTDFILE  ?= $(PREFIX)/share/sysview/motd.txt
 MOTD_MODE ?= auto
 install-motd: check-built
+	@test -s $(TARGETDIR)/motd.txt || { \
+	  echo "✗ 找不到 $(TARGETDIR)/motd.txt：畫面是 make 時產的，這裡只複製。請先以自己的身分執行 make"; exit 1; }
 	install -d $(DESTDIR)$(dir $(MOTDFILE))
-	$(TARGETDIR)/sysview --banner > $(DESTDIR)$(MOTDFILE).tmp
-	install -m 0644 $(DESTDIR)$(MOTDFILE).tmp $(DESTDIR)$(MOTDFILE)
-	rm -f $(DESTDIR)$(MOTDFILE).tmp
+	install -m 0644 $(TARGETDIR)/motd.txt $(DESTDIR)$(MOTDFILE)
 	@mode="$(MOTD_MODE)"; \
 	 if [ "$$mode" = auto ]; then \
 	   if [ -d /etc/update-motd.d ] && grep -qsE '^[[:space:]]*session[^#]*pam_motd\.so' /etc/pam.d/sshd; then mode=motd; else mode=profile; fi; \

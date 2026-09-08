@@ -36,11 +36,21 @@ fn bar(pct: f64, width: usize) -> String {
 }
 
 /// 純文字快照。刻意只用 ASCII 畫圖，方便 grep 與貼進 issue。
+/// 送進終端機前把控制字元換掉。行程名稱、命令列、裝置名是別人取的：一個叫
+/// `ESC]0;…` 的行程能改你的視窗標題、`ESC[2J` 能清你的畫面 —— 而 README 就
+/// 建議把 `--snapshot` 放進 `watch`。TUI 那邊 ratatui 會自己過濾控制字元，
+/// JSON 由 serde 跳脫；純文字輸出這裡要自己來。
+pub fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 pub fn text(history: usize, interval: std::time::Duration, gpu: bool) -> String {
     let s = sample_twice_opt(history, interval, gpu);
     let mut o = String::new();
     let mut line = |x: String| {
-        o.push_str(&x);
+        o.push_str(&printable(&x));
         o.push('\n');
     };
 
@@ -345,6 +355,17 @@ mod tests {
             let b = bar(p, 20);
             assert_eq!(b.len(), 22, "{p} 產生了錯誤長度的長條：{b}");
         }
+    }
+
+    #[test]
+    fn control_characters_never_reach_the_terminal_in_text_mode() {
+        assert_eq!(printable("a\x1b]0;x\x07b\u{85}c\x1b[2J"), "a?]0;x?b?c?[2J");
+        assert_eq!(printable("plain 名稱 ok"), "plain 名稱 ok");
+        let t = text(2, std::time::Duration::from_millis(50), false);
+        assert!(
+            t.chars().all(|c| !c.is_control() || c == '\n'),
+            "純文字快照裡不能有換行以外的控制字元"
+        );
     }
 
     #[test]

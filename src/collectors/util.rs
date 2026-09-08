@@ -167,21 +167,39 @@ pub fn username(uid: u32) -> String {
 }
 
 fn lookup_uid(uid: u32) -> Option<String> {
-    // SAFETY: getpwuid 回傳指向靜態緩衝區的指標；我們立刻複製出字串，
-    // 且在同一執行緒內不會有第二次呼叫介入。
-    unsafe {
-        let pw = libc::getpwuid(uid as libc::uid_t);
-        if pw.is_null() {
+    // getpwuid_r 而不是 getpwuid：後者回傳的是**全程序共用**的靜態緩衝區，
+    // 行程掃描在背景執行緒、Explain 在主執行緒，兩邊第一次各查一個 uid 撞在一起
+    // 就會讀到對方的名字（或半截）。這裡每次呼叫用自己的緩衝區，ERANGE 就放大重試。
+    let mut buf = vec![0u8; 1024];
+    loop {
+        let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut out: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: pw / buf / out 都是這個呼叫自己的記憶體，活得比呼叫久；
+        // 回傳 0 且 out 非空時 pw.pw_name 指向 buf 裡的 NUL 結尾字串。
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid as libc::uid_t,
+                &mut pw,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut out,
+            )
+        };
+        if rc == libc::ERANGE {
+            if buf.len() >= 1 << 20 {
+                return None;
+            }
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || out.is_null() || pw.pw_name.is_null() {
             return None;
         }
-        let name = (*pw).pw_name;
-        if name.is_null() {
-            return None;
-        }
-        std::ffi::CStr::from_ptr(name)
+        // SAFETY: 見上；在 buf 被釋放前就複製成 String。
+        return unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }
             .to_str()
             .ok()
-            .map(str::to_owned)
+            .map(str::to_owned);
     }
 }
 
@@ -216,4 +234,22 @@ pub fn effective_uid() -> u32 {
 /// 目前程序的真實 uid。
 pub fn real_uid() -> u32 {
     unsafe { libc::getuid() }
+}
+
+#[cfg(test)]
+mod pw_tests {
+    #[test]
+    fn username_lookup_is_consistent_across_threads() {
+        let me = super::real_uid();
+        let expect = super::username(me);
+        assert_ne!(expect, me.to_string(), "自己的帳號名應該查得到");
+        let handles: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(move || (super::lookup_uid(me), super::lookup_uid(0))))
+            .collect();
+        for h in handles {
+            let (mine, root) = h.join().unwrap();
+            assert_eq!(mine.as_deref(), Some(expect.as_str()));
+            assert_eq!(root.as_deref(), Some("root"));
+        }
+    }
 }

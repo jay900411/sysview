@@ -108,6 +108,17 @@ fn parse_argv(argv: &[String]) -> Result<Operation, ValidationError> {
         return Err(ValidationError::UnknownOperation);
     };
     let flags = parse_flags(&argv[1..])?;
+    // 每個操作只認自己的參數；多給的一律拒絕 ——「多一個沒關係」是 parser 變寬的起點
+    let allowed: &[&str] = match sub.as_str() {
+        "storage-user-detail" => &["user"],
+        "process-detail" => &["pid"],
+        "process-signal" => &["pid", "starttime", "signal"],
+        "renice" => &["pid", "starttime", "nice"],
+        _ => &[],
+    };
+    if flags.keys().any(|k| !allowed.contains(&k.as_str())) {
+        return Err(ValidationError::UnknownOperation);
+    }
 
     let need = |k: &str| -> Result<&String, ValidationError> {
         flags.get(k).ok_or(ValidationError::UnknownOperation)
@@ -679,20 +690,41 @@ fn comm_of(pid: i32) -> Option<String> {
 ///
 /// `sudo` 本身也會留下自己的 log，兩者互相佐證。
 fn audit(op: &Operation, result: &str) {
-    let ruid = util::real_uid();
+    // 在 sudo 底下 getuid() 已經是 0：真正的呼叫者只在 sudo 留下的環境變數裡。
+    let who = format!("uid={}{}", util::real_uid(), sudo_caller());
     let msg = match op {
         Operation::ProcessSignal { pid, signal, .. } => format!(
-            "uid={ruid} op={} target_pid={pid} signal={} result={result}",
+            "{who} op={} target_pid={pid} signal={} result={result}",
             op.name(),
             signal.name()
         ),
         Operation::Renice { pid, nice, .. } => format!(
-            "uid={ruid} op={} target_pid={pid} nice={nice} result={result}",
+            "{who} op={} target_pid={pid} nice={nice} result={result}",
             op.name()
         ),
-        _ => format!("uid={ruid} op={} result={result}", op.name()),
+        _ => format!("{who} op={} result={result}", op.name()),
     };
     write_syslog(&msg);
+}
+
+/// sudo 留下的呼叫者資訊（`SUDO_UID` / `SUDO_USER`），**只拿來記錄，不拿來授權**：
+/// 授權是 sudoers 的事，這兩個變數任何人都能自己設。sudo 自己的 log 才是權威，
+/// 這裡只是讓 `journalctl -t sysview-priv` 一眼看得出是誰。
+fn sudo_caller() -> String {
+    let uid = std::env::var("SUDO_UID")
+        .ok()
+        .filter(|s| !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit()));
+    let user = std::env::var("SUDO_USER")
+        .ok()
+        .filter(|s| sysview::privilege::protocol::validate_username(s).is_ok());
+    let mut out = String::new();
+    if let Some(u) = uid {
+        out.push_str(&format!(" sudo_uid={u}"));
+    }
+    if let Some(n) = user {
+        out.push_str(&format!(" sudo_user={n}"));
+    }
+    out
 }
 
 fn write_syslog(msg: &str) {
@@ -766,6 +798,25 @@ mod tests {
                 "{bad:?} 必須被拒絕 —— helper 不是任意指令的閘道"
             );
         }
+    }
+
+    #[test]
+    fn rejects_extra_flags_even_when_well_formed() {
+        assert!(parse_argv(&argv(&["capability", "--banana", "value"])).is_err());
+        assert!(parse_argv(&argv(&["process-detail", "--pid", "42", "--unused", "x"])).is_err());
+        assert!(parse_argv(&argv(&[
+            "renice",
+            "--pid",
+            "42",
+            "--starttime",
+            "9",
+            "--nice",
+            "5",
+            "--extra",
+            "1"
+        ]))
+        .is_err());
+        assert!(parse_argv(&argv(&["process-detail", "--pid", "42"])).is_ok());
     }
 
     #[test]

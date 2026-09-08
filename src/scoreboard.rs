@@ -395,20 +395,44 @@ fn write_file(path: &Path, entries: &[Stored]) -> std::io::Result<()> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(&tmp)?;
+    // 暫存檔用 O_EXCL 建：共用目錄是 1777，別人可以事先在我們會用的名字上放一個
+    // symlink 或一般檔等我們去寫。O_EXCL 遇到任何已存在的東西（包括 symlink）都是
+    // 失敗而不是跟過去；名字撞了就換下一個序號，永遠不覆蓋已存在的檔。核心的
+    // protected_symlinks / protected_regular 在多數發行版預設也會擋這種事，
+    // 但那是別人的設定，不能當自己的防線。
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("scores");
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let pid = std::process::id();
+    let (tmp, mut f) = (0..64)
+        .map(|n| dir.join(format!("{stem}.tmp-{pid}-{n}")))
+        .find_map(|tmp| {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&tmp)
+            {
+                Ok(f) => Some(Ok((tmp, f))),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .unwrap_or_else(|| Err(std::io::Error::other("暫存檔名全部被佔用")))?;
+    let written = (|| {
         f.write_all(&serde_json::to_vec_pretty(entries)?)?;
         f.sync_all()?;
+        // create 的 mode 會被 umask 遮掉：透過 fd 明確設一次（不經路徑，換不掉）
+        f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    // create 的 mode 會被 umask 遮掉：明確設一次
-    std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
-    std::fs::rename(&tmp, path)
+    written
 }
 
 /// 目錄存在而且我們寫得進去。只用 `access(2)`，不試寫。
@@ -618,6 +642,35 @@ mod tests {
         assert_eq!(raw[0].tag, tag(me(), "jay", 120, raw[0].at));
         let top = store.load();
         assert_eq!((top.top()[0].score, top.top()[0].uid), (120, me()));
+    }
+
+    #[test]
+    fn a_symlink_planted_at_the_temp_name_is_never_followed() {
+        // 1777 的共用目錄裡，別人可以先在我們會用的暫存檔名上放一個 symlink。
+        // O_EXCL 讓它只是「這個名字不能用」：換下一個；symlink 指到的檔一根毛都不能少。
+        let dir = scratch("planted");
+        let canary = dir.join("canary.txt");
+        std::fs::write(&canary, b"do not touch").unwrap();
+        let own = dir.join(format!("{}.json", me()));
+        let planted = dir.join(format!("{}.tmp-{}-0", me(), std::process::id()));
+        std::os::unix::fs::symlink(&canary, &planted).unwrap();
+        let store = Store::with_paths(Some(dir.clone()), own.clone(), me());
+        assert!(matches!(
+            store.record("ada", 300).unwrap(),
+            Verdict::Recorded { .. }
+        ));
+        assert_eq!(std::fs::read(&canary).unwrap(), b"do not touch");
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "被種的 symlink 原封不動"
+        );
+        assert!(std::fs::symlink_metadata(&own).unwrap().is_file());
+        assert_eq!(store.load().rank_of("ada"), Some(1));
+        let leftovers = std::fs::read_dir(&dir).unwrap().flatten().count();
+        assert_eq!(leftovers, 3, "canary、symlink、自己的檔，沒有多餘的暫存檔");
     }
 
     #[test]
