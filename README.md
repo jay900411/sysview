@@ -101,7 +101,11 @@ sudo make install-motd      # ssh 登入時顯示 logo、吉祥物與一句話�
 
 安裝時用你的身分把畫面產成一個純文字檔（`sysview --banner`），登入腳本只 `cat` 它 ——
 登入時不會執行任何 sysview 程式碼，所以畫面上刻意沒有即時數字（那是 `sysview` 本人的事）。
-Ubuntu / Debian 放進 `/etc/update-motd.d/`，其他發行版放 `/etc/profile.d/`；
+
+掛在哪裡會自動判斷，安裝時會印出來：`/etc/pam.d/sshd` 有在跑 pam_motd 的機器
+（Ubuntu / Debian 預設）放 `/etc/update-motd.d/`，印在 `Last login` 之前；其他情況
+（別的發行版，或管理員關掉了動態 motd、只留 `/etc/motd`）放 `/etc/profile.d/`，
+印在 `Last login` 與 `/etc/motd` 之後。想指定就 `MOTD_MODE=motd` 或 `MOTD_MODE=profile`。
 跟 neofetch 之類寫在 shell rc 裡的登入畫面可以並存，它會印在前面。
 
 ### 更新與移除

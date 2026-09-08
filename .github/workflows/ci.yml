@@ -165,6 +165,21 @@ jobs:
           make install DESTDIR="$PWD/stage"
           find stage -type f -printf '%M %p\n' | sort
 
+      # 登入畫面：兩種掛法都要能裝進 DESTDIR；登入腳本只能 cat 靜態檔，
+      # 不能執行 sysview（登入時 PAM 是 root）。
+      - name: 登入畫面（DESTDIR 暫存）
+        run: |
+          make install-motd DESTDIR="$PWD/stage" MOTD_MODE=motd
+          test -x stage/etc/update-motd.d/60-sysview
+          make install-motd DESTDIR="$PWD/stage" MOTD_MODE=profile
+          test -f stage/etc/profile.d/sysview-motd.sh
+          test ! -e stage/etc/update-motd.d/60-sysview
+          ! grep -q 'bin/sysview\|sysview --' stage/etc/profile.d/sysview-motd.sh
+          test -s stage/usr/local/share/sysview/motd.txt
+          make uninstall-motd DESTDIR="$PWD/stage"
+          test ! -e stage/etc/profile.d/sysview-motd.sh
+          echo "✓ 登入畫面兩種掛法都裝得起來，而且登入時不執行 sysview"
+
       # 家目錄安裝：完全不需要 root。這是「我在那台機器上沒有 sudo」時
       # 自己就能走完的路。
       - name: 家目錄安裝（不用 root）

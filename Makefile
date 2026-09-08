@@ -44,6 +44,8 @@ help:
 	@echo "make install    安裝執行檔到 $(PREFIX)（需要 root）"
 	@echo "make install-user    只裝給自己，裝到 ~/.local（不需要 root）"
 	@echo "make install-source  另外把原始碼放到 $(SRCDIR)，讓其他管理員能維護"
+	@echo "make install-motd    ssh 登入畫面：logo、吉祥物、一句話（需要 root；MOTD_MODE=auto/motd/profile）"
+	@echo "make uninstall-motd  移除登入畫面"
 	@echo "make verify     驗證安裝結果的權限是否安全"
 	@echo "make uninstall  移除"
 	@echo "make legacy     編譯 C++ v1（regression oracle）"
@@ -238,28 +240,46 @@ verify-shared:
 
 # ── 登入時的歡迎畫面（選用）──────────────────────────────────────────
 #
-# 把 logo + 吉祥物 + 一句話放進 ssh 登入的 MOTD。安全前提：登入時 PAM 是以
+# 把 logo + 吉祥物 + 一句話放進 ssh 登入畫面。安全前提：登入時 PAM 是以
 # root 執行 motd 腳本的，所以**登入時絕不執行 sysview** —— 這裡用建置者的
 # 身分把 banner 產成純文字檔（sysview --banner），登入腳本只 cat 那個檔。
 #
-# Ubuntu / Debian：/etc/update-motd.d/60-sysview（pam_motd 會跑）
-# 其他發行版：    /etc/profile.d/sysview-motd.sh（互動 shell 才印）
-MOTDFILE    ?= $(PREFIX)/share/sysview/motd.txt
+# 掛在哪裡（MOTD_MODE）：
+#   auto     預設。/etc/pam.d/sshd 裡 pam_motd 有在跑就用 motd，否則 profile。
+#   motd     /etc/update-motd.d/60-sysview：pam_motd 在 ssh 登入時執行，印在
+#            Last login 之前。注意目錄存在不代表有在跑 —— 管理員常把 pam_motd
+#            關掉、只留 sshd 直接印的 /etc/motd，那樣放進去永遠不會出現。
+#   profile  /etc/profile.d/sysview-motd.sh：登入 shell 啟動時印，任何發行版、
+#            任何 PAM 設定都行；印在 Last login 與 /etc/motd 之後。tmux / screen
+#            開的新 shell 不印。
+MOTDFILE  ?= $(PREFIX)/share/sysview/motd.txt
+MOTD_MODE ?= auto
 install-motd: check-built
 	install -d $(DESTDIR)$(dir $(MOTDFILE))
 	$(TARGETDIR)/sysview --banner > $(DESTDIR)$(MOTDFILE).tmp
 	install -m 0644 $(DESTDIR)$(MOTDFILE).tmp $(DESTDIR)$(MOTDFILE)
 	rm -f $(DESTDIR)$(MOTDFILE).tmp
-	@if [ -d /etc/update-motd.d ] || [ -d "$(DESTDIR)/etc/update-motd.d" ]; then \
+	@mode="$(MOTD_MODE)"; \
+	 if [ "$$mode" = auto ]; then \
+	   if [ -d /etc/update-motd.d ] && grep -qsE '^[[:space:]]*session[^#]*pam_motd\.so' /etc/pam.d/sshd; then mode=motd; else mode=profile; fi; \
+	 fi; \
+	 rm -f $(DESTDIR)/etc/update-motd.d/60-sysview $(DESTDIR)/etc/profile.d/sysview-motd.sh; \
+	 if [ "$$mode" = motd ]; then \
 	   install -d $(DESTDIR)/etc/update-motd.d; \
 	   printf '#!/bin/sh\n# sysview 的登入畫面：只印一個靜態檔，登入時不執行任何 sysview 程式碼。\ncat "$(MOTDFILE)" 2>/dev/null\n' > $(DESTDIR)/etc/update-motd.d/60-sysview; \
 	   chmod 0755 $(DESTDIR)/etc/update-motd.d/60-sysview; \
-	   echo "  ✓ /etc/update-motd.d/60-sysview（下次 ssh 登入就看得到）"; \
-	 else \
+	   echo "  ✓ /etc/update-motd.d/60-sysview（pam_motd 有在跑；下次 ssh 登入就看得到）"; \
+	 elif [ "$$mode" = profile ]; then \
 	   install -d $(DESTDIR)/etc/profile.d; \
-	   printf '# sysview 的登入畫面：只印一個靜態檔，登入時不執行任何 sysview 程式碼。\n[ -n "$$PS1" ] && [ -t 1 ] && cat "$(MOTDFILE)" 2>/dev/null\n' > $(DESTDIR)/etc/profile.d/sysview-motd.sh; \
+	   printf '# sysview 的登入畫面：只印一個靜態檔，登入時不執行任何 sysview 程式碼。\n# 只在互動的登入 shell 印；tmux / screen 開的新 shell 不印。\n[ -n "$$PS1" ] && [ -t 1 ] && [ -z "$$TMUX" ] && [ -z "$$STY" ] && cat "$(MOTDFILE)" 2>/dev/null\n' > $(DESTDIR)/etc/profile.d/sysview-motd.sh; \
 	   chmod 0644 $(DESTDIR)/etc/profile.d/sysview-motd.sh; \
-	   echo "  ✓ /etc/profile.d/sysview-motd.sh（下次登入 shell 就看得到）"; \
+	   if [ "$(MOTD_MODE)" = auto ] && [ -d /etc/update-motd.d ]; then \
+	     echo "  ✓ /etc/profile.d/sysview-motd.sh（這台的 /etc/pam.d/sshd 沒有在跑 pam_motd，放 update-motd.d 不會出現；下次登入就看得到）"; \
+	   else \
+	     echo "  ✓ /etc/profile.d/sysview-motd.sh（下次登入 shell 就看得到）"; \
+	   fi; \
+	 else \
+	   echo "✗ MOTD_MODE=$$mode 不認得（auto / motd / profile）"; exit 1; \
 	 fi
 
 uninstall-motd:
