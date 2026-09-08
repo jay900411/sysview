@@ -1,0 +1,17 @@
+[branding]
+name = "DEVLAB"
+logo = "auto"
+mascot = "fox"
+mascot_mode = "reactive"
+mascot_fps = 3
+
+[visual]
+pattern = "braille"
+decorations = "full"
+
+[labels]
+cpu = "BRAIN"
+gpu = "CUDA"
+memory = "MEM"
+storage = "VAULT"
+network = "LINK"

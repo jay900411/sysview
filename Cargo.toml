@@ -1,0 +1,71 @@
+[package]
+name         = "sysview"
+version      = "2.0.0"
+edition      = "2021"
+# 實際下限由相依套件決定，不是我們挑的：ratatui 0.30.2 / time 0.3.55 /
+# darling 0.24 都宣告 1.88。寫低了不會比較相容 —— 只會讓 1.82~1.87 的機器
+# 編到一半才爆出看不懂的錯，而不是 cargo 一開始就說「請升級到 1.88」。
+rust-version = "1.88"
+description  = "Interactive Linux system observability with metric provenance and safe administrator extensions"
+authors      = ["YiChung Lai"]
+license      = "MIT"
+readme       = "README.md"
+repository   = "https://github.com/jay900411/sysview"
+categories   = ["command-line-utilities"]
+keywords     = ["monitoring", "tui", "system", "observability", "gpu"]
+
+[lib]
+name = "sysview"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sysview"
+path = "src/main.rs"
+
+# 最小權限 helper。只有它會被 sudo 呼叫，而且絕不 setuid。
+[[bin]]
+name = "sysview-priv"
+path = "src/bin/sysview-priv.rs"
+
+[dependencies]
+# TUI
+ratatui        = { version = "0.30", default-features = false, features = ["crossterm", "underline-color"] }
+crossterm      = { version = "0.29", default-features = false, features = ["events"] }
+unicode-width  = "0.2"
+
+# NVIDIA：NVML 是主要 backend（runtime dlopen，沒有驅動也能編譯與執行）
+nvml-wrapper   = "0.13"
+
+# 系統呼叫：statvfs / getpwuid / sysconf / signal / pidfd
+libc           = "0.2"
+
+# 錯誤處理：全程不用 unwrap/expect 處理執行期系統資訊
+anyhow         = "1"
+thiserror      = "2"
+
+# 設定檔、JSON 輸出、privileged helper 的 IPC 協定
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+toml           = "1"
+
+# CLI
+clap           = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
+
+[features]
+# 只給測試用。打開之後 PrivilegeClient 才會有「直接指定狀態」的建構子，
+# 讓 UI 測試不需要真的 sudo 就能畫出解鎖後的 Admin 畫面。
+# 這不會授予任何權限：helper 依然要 root EUID 才會動作。
+# release build 不會打開這個 feature，所以那個建構子根本不存在。
+test-support = []
+
+[dev-dependencies]
+tempfile = "3"
+# 讓整合測試連到「有打開 test-support」的那份 lib
+sysview  = { path = ".", features = ["test-support"] }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = true
+panic         = "unwind"   # 需要 catch_unwind 才能在 panic 時還原終端機

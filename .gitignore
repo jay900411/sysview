@@ -1,0 +1,16 @@
+/target
+*.o
+v2_shots.txt
+# 打包檔是產物，不進版控
+*.tar.gz
+# make build 的雜湊章（產物）
+/target/release/.plain-release.sha256
+
+# legacy C++ v1 的編譯產物。parity 測試會在它存在時拿來當 oracle，
+# 不存在就自動跳過（見 tests/parity.rs）—— 要用就自己 `make legacy`。
+# 編譯產物不進版控：它綁 glibc 版本，別台機器拿到也不能跑。
+legacy/cpp/sysview
+legacy/cpp/*.o
+
+# `cargo run --example frame_diff` 產生的報告 —— 是產物，要看自己跑一次。
+docs/mascot-frames.txt

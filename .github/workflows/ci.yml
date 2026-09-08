@@ -1,0 +1,187 @@
+# sysview CI
+#
+# 這份 workflow 要回答的是一個很具體的問題：
+# **把這個 repo clone 到另一台我沒碰過的機器上，會不會出錯？**
+#
+# 所以它不只是「跑測試」，而是逐項把搬機器時真正會踩到的東西釘住：
+#
+#   quality      —— 格式、lint、測試、冒煙執行
+#   msrv         —— Cargo.toml 宣告的最低 Rust 版本是不是真的夠用
+#   portability  —— 用較舊的 glibc 編，再丟進另一個發行版的最小容器裡跑
+#   install      —— 系統安裝與「完全不用 root」的家目錄安裝都要成功
+#
+# 刻意只用 GitHub 官方的 action（checkout / cache），工具鏈用 runner 上
+# 本來就有的 rustup 裝 —— 這個專案對「別人的程式碼跑在我的權限下」很敏感，
+# CI 也照同一個標準。
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: 格式 / lint / 測試
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安裝工具鏈
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - run: cargo fmt --all --check
+
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      # v1 的 C++ oracle 是建置產物，不進版控。先編出來，parity 的四項
+      # 比對才真的會執行，而不是靜靜地跳過。
+      - name: 編出 v1 regression oracle
+        run: make legacy
+
+      # 效能測試另外跑（見下面的 perf job）：它們斷言的是「幾毫秒以內」，
+      # 在共用的 CI runner 上會因為鄰居的負載而偽陽性。正確性測試放這裡，
+      # 這個 job 紅了就是真的壞了。
+      - name: 測試（正確性）
+        run: |
+          cargo test --locked --all-features --lib --bins \
+            --test cli --test tui_render --test describe \
+            --test parity --test privilege_security
+
+      - run: cargo build --release --locked
+
+      # 冒煙測試：這幾條路徑在沒有 TTY、沒有 GPU、沒有 sudo 的機器上
+      # 都必須自己走完並且正常結束。
+      - name: 冒煙執行
+        run: |
+          ./target/release/sysview --version
+          ./target/release/sysview --list-metrics | head -5
+          ./target/release/sysview --snapshot
+          ./target/release/sysview --json > /dev/null
+          # 沒有 TTY 時不帶參數應該自動走快照，而不是卡住等終端機
+          timeout 60 ./target/release/sysview > /dev/null
+          echo "✓ 無 TTY 時自動切換為快照"
+
+      - name: helper 在非 root 下必須拒絕執行
+        run: |
+          if ./target/release/sysview-priv capability 2>/dev/null | grep -q '"status":"ok"'; then
+            echo "✗ helper 在非 root 下竟然執行成功"; exit 1
+          fi
+          echo "✓ helper 正確拒絕"
+
+  msrv:
+    name: 最低 Rust 版本
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cargo.toml 寫的 rust-version 必須是真的 —— 寫低了不會比較相容，
+      # 只會讓舊機器編到一半才爆出看不懂的錯。這一步用**剛好那個版本**
+      # 編一次；相依套件哪天提高門檻，這裡會先紅。
+      - name: 讀出宣告的 MSRV
+        id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "宣告的 MSRV: $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: 安裝該版本工具鏈
+        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
+
+      - run: cargo +${{ steps.msrv.outputs.version }} check --locked --all-targets --all-features
+
+  portability:
+    name: 舊 glibc 編譯 + 別的發行版執行
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安裝工具鏈
+        run: rustup toolchain install stable --profile minimal
+
+      - run: cargo build --release --locked
+
+      # 執行期到底相依什麼。預期只有 libc / libgcc_s / vdso ——
+      # 多出任何一項都代表「別台機器要另外裝東西」。
+      - name: 執行期相依
+        run: |
+          ldd --version | head -1
+          ldd target/release/sysview
+          ldd target/release/sysview | grep -qE 'libnvidia|libcuda' && {
+            echo "✗ 連進了 NVIDIA 函式庫 —— 沒有驅動的機器會起不來"; exit 1; }
+          echo "✓ 只相依 libc / libgcc_s"
+
+      # 把在 Ubuntu 22.04 編出來的執行檔丟進 Debian 12 的最小映像跑：
+      # 沒有 Rust、沒有 GPU、沒有 sudo、不同發行版。這是「搬到學長的機器」
+      # 最接近的模擬。
+      - name: 在 debian:12-slim 裡執行
+        run: |
+          docker run --rm -v "$PWD/target/release:/opt/sv:ro" debian:12-slim \
+            /opt/sv/sysview --snapshot
+          docker run --rm -v "$PWD/target/release:/opt/sv:ro" debian:12-slim \
+            /opt/sv/sysview --json > /dev/null
+          echo "✓ 在 Debian 12 上可執行"
+
+      # 容器裡的 /sys 常常是殘缺的（沒有 hwmon、沒有 drm、沒有 cgroup v2
+      # 的某些檔）。這裡刻意再遮掉一層，確認少了資料只是顯示 unavailable，
+      # 而不是 panic。
+      - name: 資料來源殘缺時不可 panic
+        run: |
+          docker run --rm -v "$PWD/target/release:/opt/sv:ro" \
+            --tmpfs /sys/class/hwmon --read-only --tmpfs /tmp \
+            debian:12-slim /opt/sv/sysview --snapshot > /dev/null
+          echo "✓ 缺少感測器來源時仍正常輸出"
+
+  install:
+    name: 安裝流程
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安裝工具鏈
+        run: rustup toolchain install stable --profile minimal
+
+      - run: make build
+
+      # 系統安裝：裝進 DESTDIR 暫存區，不動 runner 真正的 /usr/local。
+      # make install 自己會跑 verify / verify-shared，權限錯了它會失敗。
+      - name: 系統安裝（DESTDIR 暫存）
+        run: |
+          make install DESTDIR="$PWD/stage"
+          find stage -type f -printf '%M %p\n' | sort
+
+      # 家目錄安裝：完全不需要 root。這是「我在那台機器上沒有 sudo」時
+      # 自己就能走完的路。
+      - name: 家目錄安裝（不用 root）
+        run: |
+          make install-user
+          ~/.local/bin/sysview --version
+          ~/.local/bin/sysview --snapshot > /dev/null
+          echo "✓ 不用 root 也裝得起來、跑得動"
+
+  perf:
+    name: 效能測試（僅供參考）
+    runs-on: ubuntu-latest
+    # 這些測試斷言的是「幾毫秒以內」。共用的 CI runner 上會有鄰居搶 CPU，
+    # 偶爾失敗不代表程式壞了 —— 所以它不擋合併，只留數字給人看。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安裝工具鏈
+        run: rustup toolchain install stable --profile minimal
+      - run: cargo test --release --locked --all-features --test performance -- --nocapture
