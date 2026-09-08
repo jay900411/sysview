@@ -91,6 +91,19 @@ cd sysview
 ~/.local/share/doc/sysview/               文件
 ```
 
+### 登入時的歡迎畫面（選用）
+
+```bash
+sudo make install-motd      # ssh 登入時顯示 logo、吉祥物與一句話；sudo make uninstall-motd 移除
+```
+
+![Login banner](docs/screenshots/motd.png)
+
+安裝時用你的身分把畫面產成一個純文字檔（`sysview --banner`），登入腳本只 `cat` 它 ——
+登入時不會執行任何 sysview 程式碼，所以畫面上刻意沒有即時數字（那是 `sysview` 本人的事）。
+Ubuntu / Debian 放進 `/etc/update-motd.d/`，其他發行版放 `/etc/profile.d/`；
+跟 neofetch 之類寫在 shell rc 裡的登入畫面可以並存，它會印在前面。
+
 ### 更新與移除
 
 ```bash

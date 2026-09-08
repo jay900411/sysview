@@ -187,7 +187,8 @@ $(printf '%s' "$GREEN")完成。$(printf '%s' "$OFF")
 $(if [ "$MODE" = user ]; then
     printf '  Admin 頁（按 A）需要 root 擁有的 helper —— 請管理員跑一次 sudo make install。'
   else
-    printf '  按 %sA%s 進入管理員擴充功能（會用 sudo 驗證，sysview 不碰你的密碼）。' "$GREEN" "$OFF"
+    printf '  按 %sA%s 進入管理員擴充功能（會用 sudo 驗證，sysview 不碰你的密碼）。\n' "$GREEN" "$OFF"
+    printf '  想讓 ssh 登入畫面出現 logo 與吉祥物：sudo make install-motd（uninstall-motd 移除）。'
   fi)
 
 $(printf '%s' "$DIM")管理員權限完全沿用系統現有的 sudo 政策。

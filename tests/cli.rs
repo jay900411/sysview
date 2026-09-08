@@ -84,3 +84,41 @@ fn json_output_actually_parses() {
         assert!(v.get(key).is_some(), "--json 少了 {key}");
     }
 }
+
+#[test]
+fn the_login_banner_is_short_narrow_and_needs_nothing() {
+    // 登入畫面是安裝時用 --banner 產成的靜態檔：沒有 TTY、沒有設定檔、沒有
+    // 顏色也要能產；每一列不超過 80 欄（ssh 客戶端的最小公分母）。
+    let out = Command::new(bin())
+        .args(["--banner", "--no-color"])
+        .env_remove("NO_COLOR")
+        .env("XDG_CONFIG_HOME", "/nonexistent")
+        .output()
+        .expect("執行 --banner");
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(!text.contains('\x1b'), "--no-color 不該有跳脫序列");
+    assert!(text.contains("sysview"), "要有程式名字：\n{text}");
+    assert!(text.contains("all in one"), "要有那句邀請：\n{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines.len() >= 10 && lines.len() <= 24,
+        "登入畫面 {} 列，不像一個 banner",
+        lines.len()
+    );
+    for l in &lines {
+        assert!(
+            unicode_width::UnicodeWidthStr::width(*l) <= 80,
+            "超過 80 欄：{l:?}"
+        );
+    }
+    // 有顏色的版本：只多了 SGR，內容一樣
+    let colour = Command::new(bin())
+        .arg("--banner")
+        .env_remove("NO_COLOR")
+        .env("XDG_CONFIG_HOME", "/nonexistent")
+        .output()
+        .expect("執行 --banner");
+    let ctext = String::from_utf8(colour.stdout).expect("utf-8");
+    assert!(ctext.contains("\x1b["), "預設應該帶顏色");
+}

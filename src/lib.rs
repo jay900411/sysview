@@ -14,6 +14,7 @@
 //! helper 取得管理員資訊。TUI 本身**永遠不以 root 執行**。
 
 pub mod app;
+pub mod banner;
 pub mod collectors;
 pub mod config;
 pub mod error;

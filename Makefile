@@ -236,6 +236,36 @@ verify-shared:
 	 esac
 	@echo "  ✓ 執行期只需要 libc/libgcc，不需要 Rust 工具鏈"
 
+# ── 登入時的歡迎畫面（選用）──────────────────────────────────────────
+#
+# 把 logo + 吉祥物 + 一句話放進 ssh 登入的 MOTD。安全前提：登入時 PAM 是以
+# root 執行 motd 腳本的，所以**登入時絕不執行 sysview** —— 這裡用建置者的
+# 身分把 banner 產成純文字檔（sysview --banner），登入腳本只 cat 那個檔。
+#
+# Ubuntu / Debian：/etc/update-motd.d/60-sysview（pam_motd 會跑）
+# 其他發行版：    /etc/profile.d/sysview-motd.sh（互動 shell 才印）
+MOTDFILE    ?= $(PREFIX)/share/sysview/motd.txt
+install-motd: check-built
+	install -d $(DESTDIR)$(dir $(MOTDFILE))
+	$(TARGETDIR)/sysview --banner > $(DESTDIR)$(MOTDFILE).tmp
+	install -m 0644 $(DESTDIR)$(MOTDFILE).tmp $(DESTDIR)$(MOTDFILE)
+	rm -f $(DESTDIR)$(MOTDFILE).tmp
+	@if [ -d /etc/update-motd.d ] || [ -d "$(DESTDIR)/etc/update-motd.d" ]; then \
+	   install -d $(DESTDIR)/etc/update-motd.d; \
+	   printf '#!/bin/sh\n# sysview 的登入畫面：只印一個靜態檔，登入時不執行任何 sysview 程式碼。\ncat "$(MOTDFILE)" 2>/dev/null\n' > $(DESTDIR)/etc/update-motd.d/60-sysview; \
+	   chmod 0755 $(DESTDIR)/etc/update-motd.d/60-sysview; \
+	   echo "  ✓ /etc/update-motd.d/60-sysview（下次 ssh 登入就看得到）"; \
+	 else \
+	   install -d $(DESTDIR)/etc/profile.d; \
+	   printf '# sysview 的登入畫面：只印一個靜態檔，登入時不執行任何 sysview 程式碼。\n[ -n "$$PS1" ] && [ -t 1 ] && cat "$(MOTDFILE)" 2>/dev/null\n' > $(DESTDIR)/etc/profile.d/sysview-motd.sh; \
+	   chmod 0644 $(DESTDIR)/etc/profile.d/sysview-motd.sh; \
+	   echo "  ✓ /etc/profile.d/sysview-motd.sh（下次登入 shell 就看得到）"; \
+	 fi
+
+uninstall-motd:
+	rm -f $(DESTDIR)$(MOTDFILE) $(DESTDIR)/etc/update-motd.d/60-sysview $(DESTDIR)/etc/profile.d/sysview-motd.sh
+	rmdir $(DESTDIR)$(dir $(MOTDFILE)) 2>/dev/null || true
+
 uninstall:
 	rm -f $(HOME)/.local/bin/sysview
 	rm -rf $(HOME)/.local/share/doc/sysview

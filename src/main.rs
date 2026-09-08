@@ -57,6 +57,9 @@ struct Cli {
     /// 印出預設設定檔範本
     #[arg(long)]
     print_config: bool,
+    /// 印出登入用的歡迎畫面（logo、吉祥物、一句話）後離開；給 `make install-motd` 用
+    #[arg(long)]
+    banner: bool,
 
     /// 停用顏色（也可用 NO_COLOR 環境變數）
     #[arg(long)]
@@ -100,6 +103,14 @@ fn main() -> std::process::ExitCode {
     }
 
     let (mut config, warning) = Config::load();
+    if cli.banner {
+        // 登入畫面是安裝時產成檔案的：這裡沒有 TTY、沒有 collector、沒有特權
+        let brand =
+            sysview::ui::visual::logo::Brand::new(&config.branding.name, &config.branding.logo);
+        let colour = !cli.no_color && std::env::var_os("NO_COLOR").is_none();
+        print!("{}", sysview::banner::banner(&brand, colour));
+        return std::process::ExitCode::SUCCESS;
+    }
     if let Some(i) = cli.interval {
         config.interval = i;
     }
