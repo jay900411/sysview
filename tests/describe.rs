@@ -290,20 +290,10 @@ fn vanished_process_is_reported_not_faked() {
 
 // ── UI 覆蓋率 ────────────────────────────────────────────────────────────
 
-/// 沒有 GPU 的機器（CI runner、一般筆電的容器）GPU 頁只有一句「沒有偵測到
-/// GPU」，本來就沒有東西可選 —— 那不是頁面忘了登記區域。有 GPU 的機器才
-/// 檢查它。
-fn gpu_page_is_empty_here(app: &sysview::app::App, view: View) -> bool {
-    view == View::Gpu && app.state.gpu.state().devices.is_empty()
-}
-
 #[test]
 fn every_selectable_ui_element_has_a_valid_describe_target() {
     for view in VIEWS {
         let (app, _t) = app_rendered(view);
-        if gpu_page_is_empty_here(&app, view) {
-            continue;
-        }
         assert!(
             !app.regions.is_empty(),
             "{} 頁沒有任何可選區域",
@@ -359,9 +349,6 @@ fn no_selectable_element_says_no_description_available() {
 fn pressing_e_on_any_selectable_element_opens_a_description() {
     for view in VIEWS {
         let (mut app, mut term) = app_rendered(view);
-        if gpu_page_is_empty_here(&app, view) {
-            continue;
-        }
         app.on_key(Key::Enter);
         term.draw(|f| sysview::ui::draw(&app, f)).unwrap();
         for _ in 0..6 {
@@ -498,14 +485,25 @@ fn path_describe_handles_unreadable_paths_gracefully() {
 }
 
 #[test]
-fn a_machine_without_a_gpu_has_nothing_to_select_on_the_gpu_page() {
-    // CI runner 沒有 GPU：GPU 頁只有一句「沒有偵測到」，沒有可選區域。
-    // 上面兩個測試對這種機器跳過 GPU 頁，這裡把「跳過的條件」本身釘住。
+fn a_machine_without_a_gpu_still_has_an_explainable_gpu_page() {
+    // CI runner 沒有 GPU。GPU 頁不能因此變成整個介面裡唯一進不去的一頁：
+    // 「找不到 GPU」那一塊本身就是可選的，按 e 解釋這一頁讀什麼。
     let (app, _t) = app_rendered_without_gpu(View::Gpu);
-    assert!(gpu_page_is_empty_here(&app, View::Gpu));
-    assert!(app.regions.is_empty(), "沒有 GPU 卻登記了可選區域");
-    // 其他頁不受影響
-    let (app, _t) = app_rendered_without_gpu(View::Cpu);
-    assert!(!gpu_page_is_empty_here(&app, View::Cpu));
-    assert!(!app.regions.is_empty());
+    assert!(app.state.gpu.state().devices.is_empty());
+    assert!(!app.regions.is_empty(), "沒有 GPU 也要有可選區域");
+    for r in app.regions.all() {
+        let c = describe(&r.target, &app.state);
+        assert!(
+            !c.is_empty() && !c.summary.is_empty(),
+            "「{}」沒有說明",
+            r.label
+        );
+        if let DescribeTarget::Metric(id) = &r.target {
+            assert!(
+                sysview::metrics::lookup(id).is_some(),
+                "「{}」指向不存在的 metric {id}",
+                r.label
+            );
+        }
+    }
 }

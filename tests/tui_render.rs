@@ -551,12 +551,58 @@ fn cpu_core_statistics_rows_are_individually_explainable() {
         .filter(|r| r.parent.is_some())
         .map(|r| r.label.clone())
         .collect();
-    for want in ["Logical CPUs", "Avg Frequency", "Package Temp"] {
+    // Package Temp 只在有溫度感測器的機器上才會畫（沒有的 reading 不畫，
+    // 不硬塞一列 n/a）—— CI runner 與大部分虛擬機都沒有 coretemp。
+    let mut want = vec!["Logical CPUs", "Avg Frequency"];
+    if app.state.cpu.state().temp.get().is_some() {
+        want.push("Package Temp");
+    }
+    for want in want {
         assert!(
             labels.iter().any(|l| l == want),
             "「{want}」應該是可以單獨選取並解釋的一列，實際有：{labels:?}"
         );
     }
+}
+
+/// 沒有 GPU 的機器（CI runner、虛擬機）：GPU 頁仍然要能進去、能按 e。
+/// 之前那一頁只有一句置中的「找不到任何 GPU 裝置」，沒有登記任何區域，
+/// 是整個介面裡唯一進不去的一頁。
+#[test]
+fn a_machine_without_a_gpu_still_gets_a_navigable_gpu_page() {
+    let config = Config {
+        gpu: false,
+        branding: sysview::config::Branding {
+            splash: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut app = App::new(config, ColorDepth::TrueColor);
+    app.view = View::Gpu;
+    app.tick(std::time::Instant::now());
+    let mut term = Terminal::new(TestBackend::new(150, 42)).expect("terminal");
+    let text = render(&app, &mut term);
+    assert!(
+        app.state.gpu.state().devices.is_empty(),
+        "關掉 GPU collector 後不該有裝置"
+    );
+    assert!(
+        text.contains("找不到任何 GPU 裝置"),
+        "要說清楚為什麼是空的：\n{text}"
+    );
+    assert!(!app.regions.is_empty(), "沒有 GPU 也要有可選區域");
+    assert!(
+        app.regions.all().iter().any(|r| r.parent.is_some()),
+        "要有可以往下鑽的一列"
+    );
+    app.on_key(Key::Enter);
+    app.on_key(Key::Char('e'));
+    assert!(
+        matches!(app.modal, Modal::Explain { .. }),
+        "GPU 頁沒有 GPU 時按 e 也要有說明（modal = {:?}）",
+        app.modal
+    );
 }
 
 #[test]

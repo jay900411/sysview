@@ -7,7 +7,7 @@ use ratatui::widgets::Widget;
 use crate::app::App;
 use crate::collectors::gpu::{DiagLevel, GpuDevice};
 use crate::theme::Subsystem;
-use crate::ui::common::{gauge_row, history_graph, placeholder, KeyValues};
+use crate::ui::common::{focus_panel, gauge_row, history_graph, KeyValues};
 use crate::ui::format;
 use crate::ui::layout::{cols, split_top};
 use crate::ui::widgets::braille::GraphStyle;
@@ -29,7 +29,22 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     if g.devices.is_empty() {
-        placeholder(buf, rest, theme, "找不到任何 GPU 裝置");
+        // 沒有 GPU 的機器也要留一個可選的區域：焦點框才有地方畫、按 e 才
+        // 解釋得了「這一頁讀什麼、為什麼這台是空的」—— 不然 GPU 頁會是整個
+        // 介面裡唯一進不去的一頁（CI runner 就是這種機器）。
+        let (inner, panel) = focus_panel(app, rest, buf, "GPU", None, "gpu.util");
+        let inner = inset(inner, 1, 0);
+        if inner.height > 0 && inner.width > 0 {
+            let msg = "找不到任何 GPU 裝置（NVML 與 /sys/class/drm 都沒有）";
+            buf.set_string(
+                inner.x,
+                inner.y,
+                format::truncate(msg, inner.width as usize),
+                theme.dim_style(),
+            );
+            app.regions
+                .add_item(panel, Rect { height: 1, ..inner }, "gpu.util", "No GPU");
+        }
         return;
     }
 
