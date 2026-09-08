@@ -137,6 +137,11 @@ else
      2. 請管理員代裝：             make && sudo make install"
     fi
     sudo make install PREFIX="$PREFIX"
+    # 先裝過 --user 的人：~/.local/bin 在 PATH 前面，會遮住剛裝的系統版
+    if [ -x "$HOME/.local/bin/sysview" ]; then
+        warn "你的 ~/.local/bin/sysview（私人版）會遮住剛裝的系統版 —— PATH 先找到它。"
+        warn "  刪掉就會用系統版：  rm ~/.local/bin/sysview"
+    fi
 fi
 
 # ── 驗證 ────────────────────────────────────────────────────────────────

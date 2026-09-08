@@ -391,6 +391,8 @@ pub struct App {
     /// 真正的行數要等文字依視窗寬度折過行才知道，那是 UI 才有的資訊。
     pub explain_max_scroll: std::cell::Cell<u16>,
     pub status: Option<(String, Instant)>,
+    /// 啟動時的提醒，留得比一般狀態訊息久（例如跑的是被系統版遮住的私人版）。
+    pub advisory: Option<(String, Instant)>,
     pub quit: bool,
     pub started: Instant,
     /// 每一幀重建的可選區域。頁面在繪製時登記自己畫了什麼，
@@ -461,6 +463,7 @@ impl App {
             explain_scroll: 0,
             explain_max_scroll: std::cell::Cell::new(0),
             status: None,
+            advisory: None,
             quit: false,
             started: Instant::now(),
             regions: Default::default(),
@@ -479,6 +482,17 @@ impl App {
             .as_ref()
             .filter(|(_, t)| t.elapsed() < Duration::from_secs(4))
             .map(|(s, _)| s.as_str())
+            .or_else(|| {
+                self.advisory
+                    .as_ref()
+                    .filter(|(_, t)| t.elapsed() < Duration::from_secs(20))
+                    .map(|(s, _)| s.as_str())
+            })
+    }
+
+    /// 啟動時的提醒：顯示 20 秒，而且不會被一般的狀態訊息蓋掉太久。
+    pub fn advise(&mut self, msg: impl Into<String>) {
+        self.advisory = Some((msg.into(), Instant::now()));
     }
 
     /// 取樣一輪。回傳 `true` 代表這次真的取到新資料（畫面需要重繪）。
@@ -2178,6 +2192,28 @@ mod tests {
         assert!(a.status_text().is_some());
         a.on_key(Key::Char(' '));
         assert!(!a.paused);
+    }
+
+    #[test]
+    fn a_startup_advisory_outlives_ordinary_notes_but_yields_to_them() {
+        // 啟動提醒（例如私人版遮住系統版）要留得夠久讓人看到；
+        // 一般狀態訊息出現時先讓它，四秒後提醒還在。
+        let mut a = app();
+        a.advise("私人版遮住系統版");
+        assert_eq!(a.status_text(), Some("私人版遮住系統版"));
+        a.note("主題：nord");
+        assert_eq!(a.status_text(), Some("主題：nord"), "一般訊息優先");
+        a.status = Some(("主題：nord".into(), Instant::now() - Duration::from_secs(5)));
+        assert_eq!(
+            a.status_text(),
+            Some("私人版遮住系統版"),
+            "訊息過期後提醒還在"
+        );
+        a.advisory = Some((
+            "私人版遮住系統版".into(),
+            Instant::now() - Duration::from_secs(21),
+        ));
+        assert_eq!(a.status_text(), None, "二十秒後提醒也該收起來");
     }
 
     // ── 彩蛋排行榜 ──────────────────────────────────────────────────

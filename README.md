@@ -6,6 +6,17 @@
 
 不需要 root。機器上每個帳號都能跑。
 
+它是用 Rust 寫的，而且刻意做得很小、很省：
+
+| | |
+|---|---|
+| 執行檔 | 一個 2.9 MB 的執行檔（Admin 頁的 helper 另外 0.8 MB）；執行期只用到 libc 與 libgcc_s，不裝任何函式庫 |
+| 常駐記憶體 | 5 MB（`--no-gpu`）；21 MB 是連 NVIDIA 驅動函式庫自己的緩衝一起算進去 |
+| 閒置 CPU | 一顆核心的 1%（i7-13700 上等於全機 0.04%），每秒取樣一次；行程掃描在背景執行緒 |
+| 畫面 | 事件驅動：沒有新資料、沒有按鍵就不重畫；一幀不到 0.5 ms |
+
+（實測數字，環境與方法在 [docs/design.md](docs/design.md)。）
+
 ![Overview](docs/screenshots/overview.png)
 
 ## 特色
@@ -65,6 +76,9 @@ cd sysview
 | Admin 頁 | 有 | 沒有（它需要 root 擁有的 helper） |
 | 恐龍彩蛋的排行榜 | 全機共用 | 只有自己（管理員裝過全機版之後會自動變成共用） |
 
+**先裝過 `--user`、後來管理員又裝了全機版**：`~/.local/bin` 通常排在 PATH 前面，
+你會繼續跑到家目錄那份舊的。sysview 啟動時會在底部提醒；刪掉它就好：`rm ~/.local/bin/sysview`。
+
 裝到哪裡：
 
 ```
@@ -115,20 +129,12 @@ sysview --no-gpu        # 不載入 NVIDIA 函式庫，常駐記憶體約 4 MB
 
 ### 按 `e`
 
-被框住的那一格是什麼，說明就是什麼：一個 metric 會給意義、算式、來源、陷阱、原生指令；
+被框住的那一格是什麼，說明就是什麼：一個 metric 會給意義、算式、來源、陷阱、對應的原生指令；
 一個具體的東西（某張 GPU、某個網路介面、某個行程、某個掛載點）會給它的實測資料。
 
-```
-╭─┤ GPU Utilization ├────────────────────────┤ gpu.util · % ├╮
-│ What is this?                                              │
-│ 取樣區間內，GPU 上至少有一個 kernel 在執行的時間比例。     │
-│ Formula   驅動統計的「有 kernel 活動」時間 ÷ 取樣區間      │
-│ Source    NVML: nvmlDeviceGetUtilizationRates              │
-│ Pitfalls  ! 這不是 CUDA core 佔用率 —— 一個只用 1% SM 的   │
-│             kernel 一直跑，也會顯示 100%。                  │
-│ Native    $ nvidia-smi dmon   $ nvtop                      │
-╰────────────────────────────────────────────────────────────╯
-```
+![Explain](docs/screenshots/explain.png)
+
+說明是編譯進去的定義加上 collector 讀到的實測值，不會憑空生成；同樣的機器狀態一定給同樣的說明。
 
 ### 頁面
 

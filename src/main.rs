@@ -172,6 +172,9 @@ fn main() -> std::process::ExitCode {
     if let Some(w) = warning.or(clamp_note) {
         app.note(w);
     }
+    if let Some(w) = shadowed_by_private_copy() {
+        app.advise(w);
+    }
 
     let result = run(terminal, &mut app);
     ratatui::restore();
@@ -524,6 +527,24 @@ fn authenticate(terminal: DefaultTerminal, app: &mut App) -> std::io::Result<Def
         Err(e) => app.note(format!("未能解鎖：{e}")),
     }
     Ok(terminal)
+}
+
+/// 跑的是 `~/.local/bin` 的私人版，而系統版也裝了 —— PATH 通常把
+/// `~/.local/bin` 排在前面，先裝 `--user` 再請管理員裝全機版的人，會一直
+/// 跑到家目錄那份舊的（沒有 Admin 頁、沒有後來的修正）而不自知。
+fn shadowed_by_private_copy() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+    let private_dir = home.join(".local").join("bin");
+    let system = std::path::Path::new("/usr/local/bin/sysview");
+    if exe.starts_with(&private_dir) && system.is_file() {
+        return Some(
+            "你跑的是 ~/.local/bin/sysview（私人版），系統已裝有 /usr/local/bin/sysview；\
+             要用系統版（含 Admin 頁）：rm ~/.local/bin/sysview"
+                .to_owned(),
+        );
+    }
+    None
 }
 
 fn translate(k: KeyEvent) -> Option<Key> {
