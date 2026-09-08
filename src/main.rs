@@ -17,7 +17,9 @@ use sysview::theme::ColorDepth;
 #[derive(Parser, Debug)]
 #[command(
     name = "sysview",
-    version,
+    // 版本後面帶 git commit：使用者回報問題時才分得出手上跑的是哪一版
+    // （build.rs 提供；沒有 git 的環境是 "unknown"）
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("SYSVIEW_GIT_REV"), ")"),
     about = "Linux 系統觀測工具：CPU / 記憶體 / GPU / 儲存 / 網路 / 行程",
     long_about = "sysview 把 Linux 的系統觀測、教學、metric 來源追溯、診斷，\n\
                   以及安全的管理員深入資訊整合在同一個 TUI。\n\n\
